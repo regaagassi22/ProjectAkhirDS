@@ -1,0 +1,95 @@
+## Proses pemisahan kata-kata
+```{r}
+bencana_tidy <- bencana %>%
+  filter(!is.na(location), !is.na(text)) %>%
+  group_by(keyword) %>%
+  unnest_tokens(word, text) %>%
+  ungroup() %>%
+  anti_join(stop_words)
+
+# menghapus link yang ada
+bencana_tidy <- bencana_tidy %>% filter(word != "t.co", word != "https")
+glimpse(bencana_tidy)
+
+bencana_tidy %>% count(keyword, word, sort = TRUE)
+bencana_tidy
+```
+
+## Mengetahui frekuansi kata penting dengan tf idf
+```{r}
+bencana_tfidf <- bencana_tidy %>% 
+  count(keyword, word, sort = TRUE) %>% 
+  bind_tf_idf(word, keyword, n)
+
+bencana_tfidf
+
+# tf = banyaknya kata i pada dokumen j
+# idf = banyaknya dokumen yang mengandung kata i
+
+
+# test kata terpenting pada keyword explosion
+bencana_tfidf %>% 
+  filter(keyword == "explosion") %>% 
+  top_n(15, tf_idf) %>% 
+  ggplot(aes(x = reorder(word, tf_idf), y = tf_idf)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    x = "",
+    y = "tf-idf",
+    title = "Kata terpenting",
+    subtitle = "================================"
+  ) +
+  theme_light()
+
+
+```
+
+
+# Menghapus kata yang kurang penting
+```{r}
+#install.packages('topicmodels')
+
+# mengubah ke bentuk dtm biar bisa dipake di LDA
+bencana_dtm <- bencana_tidy %>% 
+  count(keyword, word) %>% 
+  cast_dtm(keyword, word, n)
+
+bencana_dtm
+
+# LDA utk membuat 5 topik dari bencana_dtm
+bencana_lda <- LDA(bencana_dtm, k = 5)
+bencana_lda
+```
+
+```{r}
+bencana_gamma <- bencana_lda %>% 
+  tidy(matrix = "gamma") %>% 
+  rename(location = document) %>% 
+  arrange(location, desc(gamma))
+
+bencana_gamma
+bencana_tidy
+
+bencana_gamma %>% 
+  ggplot(aes(x = rev(location), y = gamma, fill = factor(topic))) +
+  geom_col() +
+  coord_flip()
+
+```
+
+
+```{r}
+
+bencana_beta <- bencana_lda %>% 
+  tidy(matrix = "beta") %>% 
+  rename(word = term) %>% 
+  arrange(topic, desc(beta))
+
+bencana_beta %>% 
+  group_by(topic) %>% 
+  top_n(10, beta)   
+
+bencana_beta
+```
+

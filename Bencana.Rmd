@@ -1,0 +1,270 @@
+---
+title: "Bencana"
+author: "Ekky Ramadhan - 123190124 dan Rega Muhammad Agassi - 123190138"
+date: "10/17/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Setup package yang dibutuhkan
+```{r}
+library(shiny) # pembuatan web
+library(here) # akses lokasi
+library(vroom) # akses csv
+library(dplyr) # manupulasi data glimpse, summaries, group, dll
+library(ggplot2) # plotting 
+library(plotly) # plotting
+library(topicmodels) # pembuatan LDA
+library(tidyverse)
+library(tidytext) # Untuk Text Mining dan Preprocessing
+
+library(wordcloud)
+library(syuzhet)
+library(lubridate)
+library(scales)
+library(reshape2)
+library(tm)
+
+bencana_raw <- vroom(here("data-raw", "tweets.csv"))
+bencana_raw_scraping <- vroom(here("data-raw", "tweets_scraping.csv"))
+
+bencana <- bencana_raw %>% select(-location, -target) %>% filter(keyword == "flood" | keyword == "earthquake" | keyword == "volcano")
+bencana_scraping <- bencana_raw_scraping %>% select(id, text)
+
+View(bencana_scraping)
+View(bencana)
+```
+
+## penentuan testing dan training
+```{r}
+
+# cleaning bencana
+bencana$text <- gsub("(RT|via)((?:\\b\\W*@\\w+)+)", " ", bencana$text)
+bencana$text <- gsub("@\\w+", " ", bencana$text)
+bencana$text <- gsub("#\\w+", " ", bencana$text)
+bencana$text <- gsub("https://t.co/\\w+", " ", bencana$text)
+bencana$text <- gsub('[[:punct:]]', " ", bencana$text)
+bencana$text <- gsub('[[:cntrl:]]', " ", bencana$text)
+bencana$text <- gsub('\\d+', "", bencana$text)
+bencana$text <- gsub("[ \t]{2,}", " ", bencana$text)
+bencana$text <- gsub("^\\s+|\\s+$", "", bencana$text)
+bencana$text <- tolower(bencana$text)
+
+# cleaning bencana scraping
+bencana_scraping$text <- gsub("(RT|via)((?:\\b\\W*@\\w+)+)", " ", bencana_scraping$text)
+bencana_scraping$text <- gsub("@\\w+", " ", bencana_scraping$text)
+bencana_scraping$text <- gsub("#\\w+", " ", bencana_scraping$text)
+bencana_scraping$text <- gsub("https://t.co/\\w+", " ", bencana_scraping$text)
+bencana_scraping$text <- gsub('[[:punct:]]', " ", bencana_scraping$text)
+bencana_scraping$text <- gsub('[[:cntrl:]]', " ", bencana_scraping$text)
+bencana_scraping$text <- gsub('\\d+', "", bencana_scraping$text)
+bencana_scraping$text <- gsub("[ \t]{2,}", " ", bencana_scraping$text)
+bencana_scraping$text <- gsub("^\\s+|\\s+$", "", bencana_scraping$text)
+bencana_scraping$text <- gsub("[^[:alnum:][:blank:]?&/\\-]", "", bencana_scraping$text)
+bencana_scraping$text <- tolower(bencana_scraping$text)
+
+
+# menghilangkan stopwords bencana
+bencana <- bencana %>%
+  group_by(id, keyword) %>%
+  unnest_tokens(word, text) %>%
+  anti_join(stop_words) %>%
+  summarize(text = str_c(word, collapse = " ")) %>%
+  ungroup()
+
+# menghilangkan stopwords bencana scraping
+bencana_scraping <- bencana_scraping %>%
+  filter(!is.na(text)) %>%
+  group_by(id) %>%
+  unnest_tokens(word, text) %>%
+  anti_join(stop_words) %>%
+  summarize(text = str_c(word, collapse = " ")) %>%
+  ungroup()
+```
+# Training testing
+```{r}
+# penentuan training dan sample
+train <- bencana
+dt <- sort(sample(nrow(bencana_scraping), nrow(bencana_scraping)*.1)) # 10 persen data scraping
+dt <- bencana_scraping[dt,]
+testing <- data.frame(id = integer(), keyword = character(), text = character())
+testing <- testing%>% rbind(data.frame(dt)) %>% mutate(keyword = NA)
+
+
+glimpse(train)
+glimpse(testing)
+# write.csv(testing,"detasentiment.csv",row.names = F)
+```
+
+## proses prediksi
+```{r}
+glimpse(bencana)
+#test_akurasi <- data.frame(k = integer(), akurasi = numeric())
+#for (key in seq(3, 10, 2)) { # increment 3 - 10 sebanyak 2
+  
+  hasil_prediksi <- data.frame(id = integer(), keyword = character(), text = character())
+
+  for (i in 1:nrow(testing)) {
+    cat(sprintf("Proses: (%d / %d)\n", i, nrow(testing)))
+    
+    # mengambil data yang akan diprediksi kemudian digabungkan ke training
+    predict <- testing[i,]
+    data_tidy <- train %>% rbind(predict)
+    
+    # membuat tf idf
+    data_tfidf <- data_tidy %>% 
+      unnest_tokens(word, text) %>%
+      count(id, word, sort = TRUE) %>%
+      bind_tf_idf(word, id, n)
+    
+    view(data_tfidf)
+    
+    # mengambil kata2 yang akan diprediksi, kemudian mengalikan data predict dan data training untuk dimasukkan ke rumus cosine
+    predict_w <- data_tfidf %>% filter(id == predict$id)
+    
+    bobot_training <- data.frame(id = integer(), total = numeric())
+    
+    # pembobotan, penjumlahan bobot
+    for (j in 1:nrow(train)) {
+      temp_train <- data_tfidf %>%
+        filter(id == train$id[j])
+      
+      data_join <- predict_w %>%
+        inner_join(temp_train, by = "word") %>%
+        mutate(hasil_kali = tf_idf.x * tf_idf.y)
+      
+      bobot_training <- bobot_training %>%
+        rbind(data.frame(id = train$id[j], total = sum(data_join$hasil_kali)))
+    }
+    
+    # menentukan panjang data
+    panjang_training <- data.frame(id = integer(), akar = numeric())
+    
+    for (j in 1:nrow(data_tidy)) {
+      temp_train <- data_tfidf %>%
+        filter(id == data_tidy$id[j])
+      
+      kuadrat_temp <- temp_train$tf_idf^2
+      akar_temp <- sqrt(sum(kuadrat_temp))
+      
+      panjang_training <- panjang_training %>%
+        rbind(data.frame(id = data_tidy$id[j], akar = akar_temp))
+    }
+    
+    # cosine similarity
+    predict_panjang <- panjang_training %>% filter(id == predict$id)
+    
+    cosine <- data.frame(id = integer(), hasil_cosine = numeric())
+    
+    for (j in 1:nrow(train)) {
+      cosine_temp <- bobot_training$total[j] / (predict_panjang$akar * panjang_training$akar[j])
+      cosine <- cosine %>%
+        rbind(data.frame(id = train$id[j], hasil_cosine = cosine_temp))
+    }
+    # sorting hasil cosine
+    cosine <- cosine %>% arrange(desc(hasil_cosine))
+    
+    # proses knn
+    k <- 7 # diusahakan ganjil, 7 yang paling tinggi
+    
+    # dicari 7 data terdekat
+    predict_knn <- cosine %>%
+      inner_join(train, by = "id") %>%
+      select(id, hasil_cosine, keyword, text) %>%
+      head(k)
+    
+    view(predict_knn)
+    
+    sentiment_predict <- predict_knn %>% count(keyword)
+    sentiment_predict <- sentiment_predict$keyword[which.max(sentiment_predict$n)]
+    
+    hasil_prediksi <- hasil_prediksi %>%
+      rbind(data.frame(id = predict$id, keyword = sentiment_predict))
+  }
+  
+  hasil_prediksi %>% mutate(text = testing$text) %>% arrange(desc(id))
+  
+  view(hasil_prediksi)
+  text_raw <- bencana_raw_scraping %>% select(id, text)
+  
+  data_akhir <- hasil_prediksi %>% 
+    left_join(text_raw, by = "id")
+
+  view(data_akhir)
+  # write.csv(data_akhir,"datakagel.csv",row.names = F)
+  
+# Testing akurasi
+
+  #compare_predict <- testing
+  #compare_predict <- compare_predict %>% 
+  #  inner_join(hasil_prediksi, by = "id") %>%
+  #  mutate(akurasi_poin = ifelse(keyword.x == keyword.y, 1, 0))
+  
+  #compare_predict %>% arrange(desc(id))
+  
+  #compare_predict %>% group_by(keyword.x) %>% count()
+  
+  #akurasi <- (compare_predict %>%
+  #  filter(akurasi_poin == 1) %>%
+  #  count())$n / (compare_predict %>%
+  #  count())$n
+  #akurasi
+  
+  #test_akurasi <- test_akurasi %>% rbind(data.frame(k = key, akurasi = akurasi))
+  
+  test_akurasi
+#}
+#test_akurasi
+```
+
+# Word Cloud
+```{r}
+# melihat isi terlebih dahulu
+corpus <- iconv(testing$text)
+corpus <- Corpus(VectorSource(corpus))
+inspect(corpus[1:5])
+
+# Term document matrix
+tdm <- TermDocumentMatrix(corpus)
+tdm <- as.matrix(tdm)
+tdm[1:10, 1:20] # melihat matrix banyaknya kata-i pada kalimat-j
+
+# Bar plot
+w <- rowSums(tdm)
+w <- subset(w, w>=25) # melihat banyak kata yang lebih dari 25
+#w # melihat banyaknya frekuensi kata
+
+# Word Cloud
+w <- sort(rowSums(tdm), decreasing = TRUE)
+#w
+set.seed(222)
+
+wordcloud(words = names(w),
+          freq = w,
+          max.words = 500,
+          random.order = F,
+          min.freq = 50,
+          colors = brewer.pal(8, 'Dark2'),
+          scale = c(2, 0.3))
+
+w_data <- data.frame(names(w), w)
+colnames(w_data) <- c('word', 'freq')
+```
+
+
+# Emotion Sentiment
+```{r}
+# Sentiment analysis
+tweets <- iconv(testing$text)
+s <- get_nrc_sentiment(tweets)
+head(s)
+
+barplot(colSums(s),
+        las = 2,
+        col = rainbow(10),
+        ylab = 'Count',
+        main = 'Sentiment Scores for Disasters')
+```
